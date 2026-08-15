@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "serena-skill-cli"
+version = "0.1.0"
+description = "Token-light CLI frontend for Serena MCP, designed for OpenCode skills"
+readme = "README.md"
+requires-python = ">=3.11,<3.15"
+dependencies = [
+  "mcp==1.28.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+]
+
+[project.scripts]
+serena-cli = "serena_skill_cli.cli:main"
+serena-skill = "serena_skill_cli.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/serena_skill_cli"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "integration: requires the real Serena executable and MCP SDK",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
