@@ -38,7 +38,7 @@ class MCPClient:
         from mcp.client.streamable_http import streamable_http_client
 
         async def run():
-            async with streamable_http_client(url) as (read_stream, write_stream):
+            async with streamable_http_client(url) as (read_stream, write_stream, _get_session_id):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
                     return await operation(session)

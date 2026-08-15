@@ -1,0 +1,4 @@
+.serena
+uv.lock
+src/serena_skill_cli/__pycache__/**
+tests/__pycache__/**

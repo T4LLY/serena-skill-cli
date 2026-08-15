@@ -62,7 +62,7 @@ Use `--force` to update an existing copy.
 ## Examples
 
 ```powershell
-serena-cli symbol overview Packages/com.example/Editor/Foo.cs --pretty
+serena-cli --pretty symbol overview Packages/com.example/Editor/Foo.cs
 serena-cli symbol find Foo/Bar --path Packages/com.example/Editor/Foo.cs
 serena-cli symbol find Foo/Bar --path Packages/com.example/Editor/Foo.cs --body
 serena-cli symbol refs Foo/Bar --path Packages/com.example/Editor/Foo.cs
@@ -72,8 +72,8 @@ serena-cli symbol diagnostics Packages/com.example/Editor/Foo.cs
 serena-cli edit rename Foo/Bar Baz --path Packages/com.example/Editor/Foo.cs
 serena-cli edit replace-body Foo/Bar --path Packages/com.example/Editor/Foo.cs --content-file body.txt
 
-serena-cli server status --pretty
-serena-cli server logs --pretty
+serena-cli --pretty server status
+serena-cli --pretty server logs
 serena-cli server stop
 ```
 
@@ -118,7 +118,7 @@ This mirrors Serena's current nearest-project behavior for normal repositories.
 New/optional Serena tools can be used without waiting for a wrapper release:
 
 ```powershell
-serena-cli tool list --pretty
+serena-cli --pretty tool list
 serena-cli tool call get_current_config --args-json '{}'
 ```
 
@@ -129,7 +129,7 @@ The high-level Skills intentionally do not advertise all tools, preserving progr
 Unit tests do not require a running Serena server:
 
 ```powershell
-pytest -q
+pytest -q -m "not integration"
 ```
 
 The integration test is opt-in and requires Serena:

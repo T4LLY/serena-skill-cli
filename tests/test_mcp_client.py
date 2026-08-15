@@ -26,3 +26,51 @@ def test_normalize_single_plain_text():
 def test_normalize_error_raises():
     with pytest.raises(RuntimeError):
         _normalize_result(FakeResult({"isError": True, "content": []}))
+
+
+@pytest.mark.asyncio
+async def test_session_accepts_mcp_1_28_three_value_transport(monkeypatch):
+    import sys
+    import types
+    from contextlib import asynccontextmanager
+
+    from serena_skill_cli.mcp_client import MCPClient
+
+    read_stream = object()
+    write_stream = object()
+
+    @asynccontextmanager
+    async def fake_streamable_http_client(url):
+        assert url == "http://127.0.0.1:19400/mcp"
+        yield read_stream, write_stream, lambda: "session-id"
+
+    class FakeClientSession:
+        def __init__(self, read, write):
+            assert read is read_stream
+            assert write is write_stream
+            self.initialized = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def initialize(self):
+            self.initialized = True
+
+    mcp_module = types.ModuleType("mcp")
+    mcp_module.ClientSession = FakeClientSession
+    mcp_client_module = types.ModuleType("mcp.client")
+    streamable_module = types.ModuleType("mcp.client.streamable_http")
+    streamable_module.streamable_http_client = fake_streamable_http_client
+
+    monkeypatch.setitem(sys.modules, "mcp", mcp_module)
+    monkeypatch.setitem(sys.modules, "mcp.client", mcp_client_module)
+    monkeypatch.setitem(sys.modules, "mcp.client.streamable_http", streamable_module)
+
+    async def operation(session):
+        return session.initialized
+
+    client = MCPClient(timeout=1)
+    assert await client._session("http://127.0.0.1:19400/mcp", operation) is True
