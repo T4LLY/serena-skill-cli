@@ -4,7 +4,17 @@ import asyncio
 import json
 from typing import Any
 
-from .errors import ToolUnavailableError
+from .errors import MCPCallError, MCPConnectionError, SerenaToolError
+
+
+def _error_text(data: dict[str, Any]) -> str:
+    content = data.get("content")
+    if isinstance(content, list):
+        texts = [entry.get("text") for entry in content if isinstance(entry, dict) and entry.get("type") == "text"]
+        texts = [text for text in texts if isinstance(text, str) and text]
+        if texts:
+            return "\n".join(texts)
+    return str(data)
 
 
 def _normalize_result(result: Any) -> Any:
@@ -12,38 +22,63 @@ def _normalize_result(result: Any) -> Any:
     if not isinstance(data, dict):
         return data
     if data.get("isError") or data.get("is_error"):
-        raise RuntimeError(f"Serena tool returned an error: {data}")
-    structured = data.get("structuredContent") or data.get("structured_content")
+        raise SerenaToolError(_error_text(data))
+    structured = data.get("structuredContent")
+    if structured is None:
+        structured = data.get("structured_content")
     if structured is not None:
         return structured
     content = data.get("content")
     if isinstance(content, list):
         texts = [entry.get("text") for entry in content if isinstance(entry, dict) and entry.get("type") == "text"]
-        if len(texts) == 1 and isinstance(texts[0], str):
+        texts = [text for text in texts if isinstance(text, str)]
+        if len(texts) == 1:
             text = texts[0]
             try:
                 return json.loads(text)
             except json.JSONDecodeError:
                 return text
+        if texts and len(texts) == len(content):
+            return texts
     return data
 
 
 class MCPClient:
-    def __init__(self, timeout: float = 30.0):
+    def __init__(self, timeout: float = 30.0, health_timeout: float = 3.0):
         self.timeout = timeout
+        self.health_timeout = min(health_timeout, timeout)
 
-    async def _session(self, url: str, operation):
-        # Lazy imports keep unit tests and --help usable before dependencies are installed.
+    async def _session(self, url: str, operation, *, timeout: float | None = None):
+        # Lazy imports keep --help and unit tests usable before dependencies are installed.
         from mcp import ClientSession
         from mcp.client.streamable_http import streamable_http_client
 
         async def run():
-            async with streamable_http_client(url) as (read_stream, write_stream, _get_session_id):
-                async with ClientSession(read_stream, write_stream) as session:
-                    await session.initialize()
-                    return await operation(session)
+            operation_started = False
+            try:
+                async with streamable_http_client(url) as (read_stream, write_stream, _get_session_id):
+                    async with ClientSession(read_stream, write_stream) as session:
+                        await session.initialize()
+                        operation_started = True
+                        return await operation(session)
+            except (SerenaToolError, asyncio.CancelledError):
+                raise
+            except Exception as exc:
+                if operation_started:
+                    raise MCPCallError(
+                        f"MCP request failed after it started for {url}: {exc}. "
+                        "The tool result may be unknown; mutating calls are not retried automatically."
+                    ) from exc
+                raise MCPConnectionError(f"MCP connection failed for {url}: {exc}") from exc
 
-        return await asyncio.wait_for(run(), timeout=self.timeout)
+        limit = self.timeout if timeout is None else timeout
+        try:
+            return await asyncio.wait_for(run(), timeout=limit)
+        except asyncio.TimeoutError as exc:
+            raise MCPCallError(
+                f"MCP operation timed out after {limit:g}s for {url}. "
+                "The tool result may be unknown; mutating calls are not retried automatically."
+            ) from exc
 
     async def list_tools(self, url: str) -> list[str]:
         async def op(session):
@@ -52,22 +87,17 @@ class MCPClient:
 
         return await self._session(url, op)
 
-    async def is_ready(self, url: str) -> bool:
+    async def is_ready(self, url: str, *, timeout: float | None = None) -> bool:
         try:
-            await self.list_tools(url)
+            await self._session(url, lambda session: session.list_tools(), timeout=timeout or self.health_timeout)
             return True
         except Exception:
             return False
 
     async def call_tool(self, url: str, tool: str, arguments: dict[str, Any]) -> Any:
         async def op(session):
-            listing = await session.list_tools()
-            available = {item.name for item in listing.tools}
-            if tool not in available:
-                raise ToolUnavailableError(
-                    f"Serena tool '{tool}' is unavailable in the active context/modes. "
-                    f"Available: {', '.join(sorted(available))}"
-                )
+            # Deliberately do not list tools first. Missing/disabled tools are
+            # surfaced by Serena itself, saving one MCP round trip per CLI call.
             result = await session.call_tool(tool, arguments=arguments)
             return _normalize_result(result)
 

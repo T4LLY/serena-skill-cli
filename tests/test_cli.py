@@ -13,3 +13,9 @@ def test_parser_maps_rename():
     tool, args = ns.mapper(ns)
     assert tool == "rename_symbol"
     assert args["new_name"] == "baz"
+
+
+def test_parser_has_longer_startup_timeout_than_operation_timeout():
+    ns = build_parser().parse_args(["server", "status"])
+    assert ns.timeout == 30.0
+    assert ns.startup_timeout == 120.0

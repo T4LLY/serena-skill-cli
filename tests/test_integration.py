@@ -25,5 +25,10 @@ async def test_real_serena_lists_tools(tmp_path: Path, monkeypatch):
         tools = await service.client.list_tools(state.url)
         assert "find_symbol" in tools
         assert "get_symbols_overview" in tools
+        overview = await service.call_tool(
+            "get_symbols_overview",
+            {"relative_path": "sample.py", "depth": -1, "max_answer_chars": -1},
+        )
+        assert "Foo" in str(overview)
     finally:
         service.stop()

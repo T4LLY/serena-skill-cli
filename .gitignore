@@ -1,4 +1,8 @@
+.venv/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.patch-applied
+.patch-inbox
+.patch-failed
 .serena
-uv.lock
-src/serena_skill_cli/__pycache__/**
-tests/__pycache__/**

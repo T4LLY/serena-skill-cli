@@ -17,13 +17,22 @@ def _candidate(project: Path) -> int:
 
 
 def _is_free(port: int) -> bool:
+    # Do not use SO_REUSEADDR for an availability probe. On Windows it can make
+    # a port appear bindable even when another listener owns it.
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind(("127.0.0.1", port))
         except OSError:
             return False
         return True
+
+
+def is_listening(port: int, timeout: float = 0.15) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 def allocate_port(project: Path) -> int:

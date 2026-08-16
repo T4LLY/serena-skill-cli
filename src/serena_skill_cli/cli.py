@@ -25,7 +25,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--project", help="Project root. Defaults to nearest .serena/project.yml or .git ancestor.")
     parser.add_argument("--context", default="ide-assistant", help="Serena context passed to start-mcp-server.")
-    parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument("--timeout", type=float, default=30.0, help="Timeout for one MCP operation.")
+    parser.add_argument("--startup-timeout", type=float, default=120.0, help="Timeout for initial Serena/LSP startup.")
     parser.add_argument("--serena-command", help="Command used to launch Serena; env: SERENA_SKILL_SERENA_COMMAND.")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -122,7 +123,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 async def _run_async(ns) -> dict:
     project = resolve_project(ns.project)
-    service = SerenaService(project, context=ns.context, timeout=ns.timeout, serena_command=ns.serena_command)
+    service = SerenaService(
+        project,
+        context=ns.context,
+        timeout=ns.timeout,
+        startup_timeout=ns.startup_timeout,
+        serena_command=ns.serena_command,
+    )
 
     if ns.command == "skill":
         installed = install_skills(project, force=ns.force)
@@ -142,19 +149,19 @@ async def _run_async(ns) -> dict:
         state = await service.ensure_server()
         return envelope(ok=True, result={"pid": state.pid, "url": state.url}, project=str(project))
 
-    state = await service.ensure_server()
     if ns.command in {"symbol", "edit"}:
         tool, arguments = ns.mapper(ns)
-        result = await service.client.call_tool(state.url, tool, arguments)
+        result = await service.call_tool(tool, arguments, retry_safe=ns.command == "symbol")
         return envelope(ok=True, result=result, tool=tool, project=str(project))
     if ns.command == "tool":
         if ns.tool_command == "list":
+            state = await service.ensure_server()
             result = await service.client.list_tools(state.url)
             return envelope(ok=True, result=result, project=str(project))
         arguments = json.loads(ns.args_json)
         if not isinstance(arguments, dict):
             raise ValueError("--args-json must decode to a JSON object")
-        result = await service.client.call_tool(state.url, ns.name, arguments)
+        result = await service.call_tool(ns.name, arguments, retry_safe=False)
         return envelope(ok=True, result=result, tool=ns.name, project=str(project))
     raise AssertionError(f"Unhandled command: {ns.command}")
 

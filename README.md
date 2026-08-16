@@ -80,7 +80,7 @@ serena-cli server stop
 Global options must come before the command, e.g.:
 
 ```powershell
-serena-cli --project C:\src\MyProject --timeout 60 symbol find Foo
+serena-cli --project C:\src\MyProject --timeout 60 --startup-timeout 180 symbol find Foo
 ```
 
 ## Serena launch override
@@ -104,6 +104,8 @@ serena start-mcp-server --transport streamable-http --host 127.0.0.1 --port <por
 ```
 
 and explicitly disables dashboard/browser/gui-log startup for the background instance.
+
+On Windows, the Serena process is created with `CREATE_NO_WINDOW` and a hidden `STARTUPINFO`; no helper CMD window should appear when OpenCode invokes `serena-cli`.
 
 ## Project resolution
 
@@ -138,6 +140,26 @@ The integration test is opt-in and requires Serena:
 pytest -q -m integration
 ```
 
+## Runtime behavior and performance
+
+For an already-running project daemon, a normal semantic query uses the fast path:
+
+```text
+state/PID check -> one MCP session -> initialize -> call_tool
+```
+
+It does **not** perform `list_tools` or a second MCP readiness session before every tool call. `server status` and explicit `tool list` still perform a real MCP probe.
+
+Initial Serena/LSP startup has its own timeout (`--startup-timeout`, default 120 seconds), separate from normal MCP operation timeout (`--timeout`, default 30 seconds). This matters for large Unity/C#/Java repositories where language-server initialization can legitimately exceed 30 seconds.
+
+Read-only calls may recover once if a stale daemon disappears. Mutating calls are never automatically retried after an ambiguous in-flight failure, preventing duplicate inserts/renames/deletes when the edit may already have been applied.
+
+To measure warm-call latency on PowerShell:
+
+```powershell
+Measure-Command { serena-cli symbol find SerenaService --path src/serena_skill_cli/service.py }
+```
+
 ## State and concurrency
 
 - Windows: `%LOCALAPPDATA%\serena-skill-cli\projects\<project-id>`
@@ -145,6 +167,8 @@ pytest -q -m integration
 - per-project file lock prevents duplicate Serena processes for the same repository
 - a global port-allocation lock prevents simultaneous projects from choosing the same local port during startup
 - stale PID/state is replaced automatically
+- Windows PID liveness uses Win32 process handles; it does not use `os.kill(pid, 0)`
+- mismatched/corrupt state is removed without killing an unrelated PID
 
 ## Compatibility boundary
 
@@ -154,4 +178,4 @@ The wrapper depends only on:
 - Streamable HTTP MCP
 - the named Serena tools and their public MCP arguments
 
-It does not import Serena's internal Python modules. `tool list` validation produces a clear error if a tool is disabled by the active Serena context/modes.
+It does not import Serena's internal Python modules. High-level calls go directly to the named Serena tool to avoid an extra `list_tools` round trip. Use `serena-cli tool list` when diagnosing tools disabled by the active Serena context/modes.
