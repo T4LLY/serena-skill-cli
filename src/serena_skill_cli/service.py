@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import replace
 from pathlib import Path
 
-from .errors import MCPCallError, MCPConnectionError, SerenaToolError, ServerStartError
+from .errors import MCPCallError, MCPConnectionError, MCPSessionExpiredError, SerenaToolError, ServerStartError
 from .locking import FileLock
-from .mcp_client import MCPClient
+from .mcp_client import MCPClient, MCPSessionInfo
 from .paths import ProjectPaths
 from .ports import allocate_port, is_listening
 from .process import process_alive, spawn_server, stop_process
@@ -30,18 +31,69 @@ class SerenaService:
         self.paths = ProjectPaths.for_project(self.project)
         self.client = MCPClient(timeout=timeout)
 
+    def _state_with_session(self, state: ServerState, session: MCPSessionInfo) -> ServerState:
+        return replace(
+            state,
+            mcp_session_id=session.session_id,
+            mcp_protocol_version=session.protocol_version,
+            version=2,
+        )
+
+    def _save_session(self, state: ServerState, session: MCPSessionInfo) -> ServerState:
+        updated = self._state_with_session(state, session)
+        updated.save(self.paths.state_file)
+        return updated
+
+    async def _initialize_existing_server(self, state: ServerState, *, timeout: float | None = None) -> ServerState:
+        session = await self.client.initialize_session(state.url, timeout=timeout)
+        return self._save_session(state, session)
+
+    async def ensure_session(self, expected: ServerState) -> ServerState:
+        if expected.has_cached_session:
+            return expected
+        with FileLock(self.paths.lock_file, timeout=self.startup_timeout):
+            current = ServerState.load(self.paths.state_file)
+            if current and current != expected and self._state_matches(current) and process_alive(current.pid):
+                if current.has_cached_session:
+                    return current
+                expected = current
+            if not current or not self._state_matches(current) or not process_alive(current.pid):
+                raise MCPConnectionError("Serena server state changed before MCP session initialization")
+            return await self._initialize_existing_server(current)
+
+    async def refresh_session(self, expected: ServerState) -> ServerState:
+        """Replace only the MCP session, keeping the warm Serena/LSP process alive."""
+        with FileLock(self.paths.lock_file, timeout=self.startup_timeout):
+            current = ServerState.load(self.paths.state_file)
+            if current and current != expected and self._state_matches(current) and process_alive(current.pid):
+                if current.has_cached_session:
+                    return current
+                expected = current
+            if not current or not self._state_matches(current) or not process_alive(current.pid):
+                raise MCPConnectionError("Serena server disappeared while refreshing the MCP session")
+            return await self._initialize_existing_server(current)
+
     async def ensure_server(self, *, probe_existing: bool = True) -> ServerState:
         """Return a matching server, starting one if needed.
 
-        Normal tool calls pass probe_existing=False so an already-known live PID
-        goes straight to the real tool call. Explicit server/status operations keep
-        the MCP readiness probe.
+        Normal tool calls pass probe_existing=False. The cached MCP session is
+        validated by the actual tools/call request instead of a separate probe.
         """
         with FileLock(self.paths.lock_file, timeout=self.startup_timeout):
             state = ServerState.load(self.paths.state_file)
             if state and self._state_matches(state) and process_alive(state.pid):
-                if not probe_existing or await self.client.is_ready(state.url):
+                if not probe_existing:
                     return state
+                try:
+                    if state.has_cached_session and await self.client.is_ready(
+                        state.url,
+                        session_id=state.mcp_session_id,
+                        protocol_version=state.mcp_protocol_version,
+                    ):
+                        return state
+                    return await self._initialize_existing_server(state, timeout=self.timeout)
+                except MCPConnectionError:
+                    pass
 
             if state:
                 self._discard_state(state)
@@ -63,12 +115,12 @@ class SerenaService:
                 while time.monotonic() < deadline:
                     if proc.poll() is not None:
                         break
-                    # Serena 1.7 starts the HTTP listener after project/LSP init.
-                    # Avoid creating MCP sessions every 150 ms while it is still booting.
                     if is_listening(port):
                         remaining = max(0.1, deadline - time.monotonic())
-                        if await self.client.is_ready(state.url, timeout=min(5.0, remaining)):
-                            return state
+                        try:
+                            return await self._initialize_existing_server(state, timeout=min(5.0, remaining))
+                        except MCPConnectionError:
+                            pass
                     await asyncio.sleep(0.15)
 
                 stop_process(proc.pid)
@@ -79,29 +131,69 @@ class SerenaService:
                     f"Log: {self.paths.log_file}\n{tail}"
                 )
 
+    async def _call_with_state(self, state: ServerState, tool: str, arguments: dict) -> object:
+        return await self.client.call_tool(
+            state.url,
+            tool,
+            arguments,
+            session_id=state.mcp_session_id,
+            protocol_version=state.mcp_protocol_version,
+        )
+
     async def call_tool(self, tool: str, arguments: dict, *, retry_safe: bool = True) -> object:
         """Fast-path one tool call, recovering once when retrying is safe."""
         state = await self.ensure_server(probe_existing=False)
+        state = await self.ensure_session(state)
         try:
-            return await self.client.call_tool(state.url, tool, arguments)
+            return await self._call_with_state(state, tool, arguments)
+        except MCPSessionExpiredError:
+            # Serena's session manager returns 404 before dispatch for an unknown
+            # session, so refreshing and retrying is safe even for edit tools.
+            state = await self.refresh_session(state)
+            return await self._call_with_state(state, tool, arguments)
         except SerenaToolError:
-            # Tool/application errors are not daemon failures; never restart for them.
             raise
         except MCPConnectionError:
-            # The request never reached the operation phase, so restarting and
-            # retrying is safe even for editing tools.
+            # The TCP connection never reached the operation phase.
             self._invalidate_matching_state(state)
-            replacement = await self.ensure_server(probe_existing=True)
-            return await self.client.call_tool(replacement.url, tool, arguments)
+            state = await self.ensure_server(probe_existing=True)
+            state = await self.ensure_session(state)
+            return await self._call_with_state(state, tool, arguments)
         except MCPCallError as first_error:
             # The request may already have executed. Never auto-retry a mutating
             # call because insert/rename/delete could be applied twice. Read-only
-            # calls can recover once if the daemon is actually gone.
-            if not retry_safe or await self.client.is_ready(state.url):
+            # requests may be repeated once on the same live session.
+            if not retry_safe:
                 raise first_error
+            if process_alive(state.pid) and is_listening(state.port):
+                try:
+                    return await self._call_with_state(state, tool, arguments)
+                except MCPSessionExpiredError:
+                    state = await self.refresh_session(state)
+                    return await self._call_with_state(state, tool, arguments)
+                except (MCPConnectionError, MCPCallError):
+                    pass
             self._invalidate_matching_state(state)
-            replacement = await self.ensure_server(probe_existing=True)
-            return await self.client.call_tool(replacement.url, tool, arguments)
+            state = await self.ensure_server(probe_existing=True)
+            state = await self.ensure_session(state)
+            return await self._call_with_state(state, tool, arguments)
+
+    async def list_tools(self) -> list[str]:
+        state = await self.ensure_server(probe_existing=False)
+        state = await self.ensure_session(state)
+        try:
+            return await self.client.list_tools(
+                state.url,
+                session_id=state.mcp_session_id,
+                protocol_version=state.mcp_protocol_version,
+            )
+        except MCPSessionExpiredError:
+            state = await self.refresh_session(state)
+            return await self.client.list_tools(
+                state.url,
+                session_id=state.mcp_session_id,
+                protocol_version=state.mcp_protocol_version,
+            )
 
     def _same_project(self, state: ServerState) -> bool:
         try:
@@ -110,11 +202,9 @@ class SerenaService:
             return False
 
     def _state_matches(self, state: ServerState) -> bool:
-        return state.version == 1 and self._same_project(state) and state.context == self.context
+        return state.version in {1, 2} and self._same_project(state) and state.context == self.context
 
     def _discard_state(self, state: ServerState) -> None:
-        # Never kill a PID from a state file that does not belong to this project.
-        # A corrupted/stale state file must not become an arbitrary process killer.
         if self._same_project(state) and process_alive(state.pid):
             stop_process(state.pid)
         remove_state(self.paths.state_file)
@@ -126,7 +216,7 @@ class SerenaService:
                 return
             self._discard_state(current)
 
-    async def status(self) -> dict:
+    async def status(self, *, probe: bool = False) -> dict:
         state = ServerState.load(self.paths.state_file)
         if not state:
             return {"running": False, "project": str(self.project)}
@@ -138,10 +228,25 @@ class SerenaService:
                 "log": str(self.paths.log_file),
             }
         alive = process_alive(state.pid)
-        ready = alive and self._state_matches(state) and await self.client.is_ready(state.url)
+        listening = alive and is_listening(state.port)
+        matching = self._state_matches(state)
+        ready: bool | None = None
+        if probe and alive and listening and matching:
+            try:
+                state = await self.ensure_session(state)
+                ready = await self.client.is_ready(
+                    state.url,
+                    session_id=state.mcp_session_id,
+                    protocol_version=state.mcp_protocol_version,
+                )
+            except MCPConnectionError:
+                ready = False
         return {
-            "running": bool(ready),
+            "running": bool(alive and listening and matching and (ready is not False)),
             "process_alive": alive,
+            "port_listening": listening,
+            "mcp_session_cached": state.has_cached_session,
+            "mcp_ready": ready,
             "project": state.project,
             "pid": state.pid,
             "port": state.port,

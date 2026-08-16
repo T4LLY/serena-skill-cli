@@ -14,6 +14,10 @@ class MCPConnectionError(SerenaSkillError):
     pass
 
 
+class MCPSessionExpiredError(MCPConnectionError):
+    """The server definitively rejected the cached MCP session ID."""
+
+
 class MCPCallError(SerenaSkillError):
     """A request had started, so retrying a mutating tool may be unsafe."""
 

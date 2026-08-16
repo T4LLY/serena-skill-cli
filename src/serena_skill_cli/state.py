@@ -14,7 +14,13 @@ class ServerState:
     url: str
     context: str
     started_at: float
-    version: int = 1
+    mcp_session_id: str | None = None
+    mcp_protocol_version: str | None = None
+    version: int = 2
+
+    @property
+    def has_cached_session(self) -> bool:
+        return bool(self.mcp_session_id and self.mcp_protocol_version)
 
     @classmethod
     def load(cls, path: Path) -> "ServerState | None":

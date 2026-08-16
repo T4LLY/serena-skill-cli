@@ -109,8 +109,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     server = sub.add_parser("server", help="Manage the per-project Serena server.")
     servers = server.add_subparsers(dest="server_command", required=True)
-    for name in ("start", "status", "stop", "restart"):
-        servers.add_parser(name)
+    servers.add_parser("start")
+    p = servers.add_parser("status")
+    p.add_argument(
+        "--probe", action="store_true", help="Perform a real MCP request instead of local PID/port checks only."
+    )
+    servers.add_parser("stop")
+    servers.add_parser("restart")
     p = servers.add_parser("logs")
     p.add_argument("--lines", type=int, default=80)
 
@@ -137,7 +142,7 @@ async def _run_async(ns) -> dict:
 
     if ns.command == "server":
         if ns.server_command == "status":
-            return envelope(ok=True, result=await service.status(), project=str(project))
+            return envelope(ok=True, result=await service.status(probe=ns.probe), project=str(project))
         if ns.server_command == "stop":
             service.stop()
             return envelope(ok=True, result={"stopped": True}, project=str(project))
@@ -155,8 +160,7 @@ async def _run_async(ns) -> dict:
         return envelope(ok=True, result=result, tool=tool, project=str(project))
     if ns.command == "tool":
         if ns.tool_command == "list":
-            state = await service.ensure_server()
-            result = await service.client.list_tools(state.url)
+            result = await service.list_tools()
             return envelope(ok=True, result=result, project=str(project))
         arguments = json.loads(ns.args_json)
         if not isinstance(arguments, dict):

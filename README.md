@@ -10,7 +10,7 @@ OpenCode -> shell -> serena-cli -> localhost Streamable HTTP MCP -> Serena -> LS
 
 OpenCode must **not** also register Serena as an MCP server, otherwise the fixed tool-schema token cost remains.
 
-Each project gets one automatically managed Serena server. The CLI stores only PID/port/url state under the user state directory; project source is never copied there.
+Each project gets one automatically managed Serena server. The CLI stores PID/port/url plus the negotiated MCP session ID/protocol version under the user state directory; project source is never copied there. No additional bridge daemon is created.
 
 ## Requirements
 
@@ -73,6 +73,7 @@ serena-cli edit rename Foo/Bar Baz --path Packages/com.example/Editor/Foo.cs
 serena-cli edit replace-body Foo/Bar --path Packages/com.example/Editor/Foo.cs --content-file body.txt
 
 serena-cli --pretty server status
+serena-cli --pretty server status --probe
 serena-cli --pretty server logs
 serena-cli server stop
 ```
@@ -131,28 +132,32 @@ The high-level Skills intentionally do not advertise all tools, preserving progr
 Unit tests do not require a running Serena server:
 
 ```powershell
-pytest -q -m "not integration"
+uv run --extra dev pytest -q -m "not integration"
 ```
 
 The integration test is opt-in and requires Serena:
 
 ```powershell
-pytest -q -m integration
+uv run --extra dev pytest -q -m integration
 ```
 
 ## Runtime behavior and performance
 
-For an already-running project daemon, a normal semantic query uses the fast path:
+The first MCP connection for a project uses the official MCP Python SDK to negotiate the protocol and create a server-side session. The transport is closed **without terminating that MCP session**, and the negotiated session ID/version are persisted beside the Serena PID.
+
+Subsequent semantic calls use the warm path:
 
 ```text
-state/PID check -> one MCP session -> initialize -> call_tool
+state/PID check -> one localhost HTTP POST -> tools/call -> result
 ```
 
-It does **not** perform `list_tools` or a second MCP readiness session before every tool call. `server status` and explicit `tool list` still perform a real MCP probe.
+The warm path does not create a new `ClientSession`, does not run `initialize`, and does not call `tools/list`. It uses Python's standard-library HTTP client, so there is no resident bridge process and no extra HTTP-client dependency.
+
+If Serena returns HTTP 404 for an expired/unknown MCP session, the CLI re-initializes only the MCP session while keeping the Serena/LSP process alive, then retries once. This retry is safe for edit tools because Serena rejects an unknown session before dispatching the request. Ambiguous in-flight edit failures are still never retried automatically.
+
+`server status` is intentionally local and fast: it checks state, PID, and listening port only. Use `server status --probe` when you explicitly want a real MCP request.
 
 Initial Serena/LSP startup has its own timeout (`--startup-timeout`, default 120 seconds), separate from normal MCP operation timeout (`--timeout`, default 30 seconds). This matters for large Unity/C#/Java repositories where language-server initialization can legitimately exceed 30 seconds.
-
-Read-only calls may recover once if a stale daemon disappears. Mutating calls are never automatically retried after an ambiguous in-flight failure, preventing duplicate inserts/renames/deletes when the edit may already have been applied.
 
 To measure warm-call latency on PowerShell:
 
@@ -160,11 +165,13 @@ To measure warm-call latency on PowerShell:
 Measure-Command { serena-cli symbol find SerenaService --path src/serena_skill_cli/service.py }
 ```
 
+After upgrading from 0.1.2, an existing live Serena process is reused. The first 0.1.3 call adds the cached MCP session fields to `state.json`; Serena/LSP does not need to restart.
+
 ## State and concurrency
 
 - Windows: `%LOCALAPPDATA%\serena-skill-cli\projects\<project-id>`
 - POSIX: `$XDG_STATE_HOME/serena-skill-cli/projects/<project-id>` or `~/.local/state/...`
-- per-project file lock prevents duplicate Serena processes for the same repository
+- per-project file lock prevents duplicate Serena processes and serializes MCP-session creation/refresh for the same repository
 - a global port-allocation lock prevents simultaneous projects from choosing the same local port during startup
 - stale PID/state is replaced automatically
 - Windows PID liveness uses Win32 process handles; it does not use `os.kill(pid, 0)`
