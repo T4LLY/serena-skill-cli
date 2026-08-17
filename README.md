@@ -194,3 +194,7 @@ The wrapper depends only on:
 - the named Serena tools and their public MCP arguments
 
 It does not import Serena's internal Python modules. High-level calls go directly to the named Serena tool to avoid an extra `list_tools` round trip. Use `serena-cli tool list` when diagnosing tools disabled by the active Serena context/modes.
+
+## License
+
+MIT License. Copyright (c) 2026 T4LLY. See [LICENSE](LICENSE).
