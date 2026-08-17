@@ -55,3 +55,30 @@ def test_force_install_rolls_back_if_second_replace_fails(tmp_path: Path, monkey
     assert edit_target.read_text(encoding="utf-8") == "old-edit"
     assert not list((tmp_path / ".opencode" / "skills").rglob("*.bak-*"))
     assert not list((tmp_path / ".opencode" / "skills").rglob("*.tmp-*"))
+
+
+def test_force_install_ignores_backup_cleanup_sharing_violation(tmp_path: Path, monkeypatch):
+    read_target = tmp_path / ".opencode" / "skills" / "serena-read" / "SKILL.md"
+    edit_target = tmp_path / ".opencode" / "skills" / "serena-edit" / "SKILL.md"
+    read_target.parent.mkdir(parents=True)
+    edit_target.parent.mkdir(parents=True)
+    read_target.write_text("old-read", encoding="utf-8")
+    edit_target.write_text("old-edit", encoding="utf-8")
+
+    real_unlink = Path.unlink
+    failed = False
+
+    def sharing_violation_once(path, *args, **kwargs):
+        nonlocal failed
+        if not failed and ".bak-" in path.name:
+            failed = True
+            raise PermissionError("simulated sharing violation")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", sharing_violation_once)
+
+    installed = install_skills(tmp_path, force=True)
+
+    assert len(installed) == 2
+    assert read_target.read_text(encoding="utf-8") != "old-read"
+    assert edit_target.read_text(encoding="utf-8") != "old-edit"

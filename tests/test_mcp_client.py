@@ -1,10 +1,12 @@
 from dataclasses import dataclass
+import asyncio
 import json
+import time
 
 import pytest
 
 import serena_skill_cli.mcp_client as mcp_client_module
-from serena_skill_cli.errors import MCPSessionExpiredError, SerenaToolError
+from serena_skill_cli.errors import MCPConnectionError, MCPSessionExpiredError, SerenaToolError
 from serena_skill_cli.mcp_client import MCPClient, _normalize_result
 
 
@@ -339,3 +341,74 @@ async def test_fallback_call_tool_does_not_list_tools_first(monkeypatch):
         "http://127.0.0.1:19400/mcp", "find_symbol", {"name_path_pattern": "Foo"}
     )
     assert result == []
+
+
+@pytest.mark.asyncio
+async def test_cached_request_does_not_block_event_loop(monkeypatch):
+    client = MCPClient(timeout=1)
+    order = []
+
+    def slow_request(*_args, **_kwargs):
+        time.sleep(0.05)
+        order.append("request")
+        return {}
+
+    async def ticker():
+        await asyncio.sleep(0.005)
+        order.append("tick")
+
+    monkeypatch.setattr(client, "_direct_request_sync", slow_request)
+
+    await asyncio.gather(
+        client._cached_request("http://127.0.0.1:19400/mcp", "session", "2025-06-18", "tools/list", {}),
+        ticker(),
+    )
+
+    assert order == ["tick", "request"]
+
+
+@pytest.mark.asyncio
+async def test_initialize_timeout_terminates_acquired_session(monkeypatch):
+    import sys
+    import types
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def fake_streamable_http_client(_url, *, terminate_on_close=True):
+        assert terminate_on_close is False
+        yield object(), object(), lambda: "orphan-session"
+
+    class FakeClientSession:
+        def __init__(self, _read, _write):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def initialize(self):
+            await asyncio.sleep(10)
+
+    mcp_module = types.ModuleType("mcp")
+    mcp_module.ClientSession = FakeClientSession
+    mcp_client_package = types.ModuleType("mcp.client")
+    streamable_module = types.ModuleType("mcp.client.streamable_http")
+    streamable_module.streamable_http_client = fake_streamable_http_client
+    monkeypatch.setitem(sys.modules, "mcp", mcp_module)
+    monkeypatch.setitem(sys.modules, "mcp.client", mcp_client_package)
+    monkeypatch.setitem(sys.modules, "mcp.client.streamable_http", streamable_module)
+
+    client = MCPClient(timeout=0.01)
+    terminated = []
+    monkeypatch.setattr(
+        client,
+        "_terminate_session_sync",
+        lambda url, session_id, *, timeout: terminated.append((url, session_id, timeout)),
+    )
+
+    with pytest.raises(MCPConnectionError, match="initialization timed out"):
+        await client.initialize_session("http://127.0.0.1:19400/mcp")
+
+    assert terminated == [("http://127.0.0.1:19400/mcp", "orphan-session", 0.01)]

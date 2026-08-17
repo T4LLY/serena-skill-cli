@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -25,17 +26,40 @@ class ServerState:
 
     @classmethod
     def load(cls, path: Path) -> "ServerState | None":
+        for attempt in range(3):
+            try:
+                text = path.read_text(encoding="utf-8")
+                break
+            except FileNotFoundError:
+                return None
+            except PermissionError:
+                if attempt == 2:
+                    raise
+                time.sleep(0.05)
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(text)
             return cls(**data)
-        except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
+        except (json.JSONDecodeError, TypeError, ValueError):
             return None
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         temp = path.with_suffix(f".tmp-{os.getpid()}")
         temp.write_text(json.dumps(asdict(self), indent=2, sort_keys=True), encoding="utf-8")
-        os.replace(temp, path)
+        try:
+            for attempt in range(3):
+                try:
+                    os.replace(temp, path)
+                    return
+                except PermissionError:
+                    if attempt == 2:
+                        raise
+                    time.sleep(0.05)
+        finally:
+            try:
+                temp.unlink()
+            except OSError:
+                pass
 
 
 def remove_state(path: Path) -> None:

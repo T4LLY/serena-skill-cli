@@ -1,4 +1,4 @@
-from serena_skill_cli.cli import build_parser
+from serena_skill_cli.cli import build_parser, main
 
 
 def test_parser_maps_symbol_find():
@@ -31,3 +31,12 @@ def test_server_status_probe_is_opt_in():
 def test_default_context_uses_current_generic_ide_context():
     ns = build_parser().parse_args(["server", "status"])
     assert ns.context == "ide"
+
+
+def test_tool_call_reports_invalid_args_json_cleanly(tmp_path, capsys):
+    rc = main(["--project", str(tmp_path), "tool", "call", "find_symbol", "--args-json", "{"])
+
+    assert rc == 1
+    error = capsys.readouterr().err
+    assert '"error_type":"ValueError"' in error
+    assert "--args-json must be valid JSON:" in error

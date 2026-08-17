@@ -45,10 +45,13 @@ def install_skills(project: Path, force: bool = False) -> list[Path]:
             changes.append((target, backup))
             os.replace(temp, target)
 
+        # Replacements are complete at this point. Backup cleanup is best-effort:
+        # a transient Windows sharing violation must not turn a successful
+        # installation into a rollback attempt.
         for backup in backups:
             try:
                 backup.unlink()
-            except FileNotFoundError:
+            except OSError:
                 pass
         return [target for target, _temp in staged]
     except Exception:
@@ -65,5 +68,5 @@ def install_skills(project: Path, force: bool = False) -> list[Path]:
         for _target, temp in staged:
             try:
                 temp.unlink()
-            except FileNotFoundError:
+            except OSError:
                 pass

@@ -162,7 +162,10 @@ async def _run_async(ns) -> dict:
         if ns.tool_command == "list":
             result = await service.list_tools()
             return envelope(ok=True, result=result, project=str(project))
-        arguments = json.loads(ns.args_json)
+        try:
+            arguments = json.loads(ns.args_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"--args-json must be valid JSON: {exc}") from exc
         if not isinstance(arguments, dict):
             raise ValueError("--args-json must decode to a JSON object")
         result = await service.call_tool(ns.name, arguments, retry_safe=False)

@@ -172,6 +172,11 @@ class SerenaService:
             timeout=self._tool_timeout(state),
         )
 
+    async def _recover_server(self, state: ServerState) -> ServerState:
+        await self._invalidate_matching_state(state)
+        recovered = await self.ensure_server(probe_existing=True)
+        return await self.ensure_session(recovered)
+
     async def call_tool(self, tool: str, arguments: dict, *, retry_safe: bool = False) -> object:
         """Fast-path one tool call, recovering once when retrying is safe."""
         state = await self.ensure_server(probe_existing=False)
@@ -181,15 +186,17 @@ class SerenaService:
         except MCPSessionExpiredError:
             # Serena's session manager returns 404 before dispatch for an unknown
             # session, so refreshing and retrying is safe even for edit tools.
-            state = await self.refresh_session(state)
-            return await self._call_with_state(state, tool, arguments)
+            try:
+                state = await self.refresh_session(state)
+                return await self._call_with_state(state, tool, arguments)
+            except MCPConnectionError:
+                state = await self._recover_server(state)
+                return await self._call_with_state(state, tool, arguments)
         except SerenaToolError:
             raise
         except MCPConnectionError:
             # The TCP connection never reached the operation phase.
-            await self._invalidate_matching_state(state)
-            state = await self.ensure_server(probe_existing=True)
-            state = await self.ensure_session(state)
+            state = await self._recover_server(state)
             return await self._call_with_state(state, tool, arguments)
         except MCPCallError as first_error:
             # The request may already have executed. Never auto-retry a mutating
@@ -201,13 +208,14 @@ class SerenaService:
                 try:
                     return await self._call_with_state(state, tool, arguments)
                 except MCPSessionExpiredError:
-                    state = await self.refresh_session(state)
-                    return await self._call_with_state(state, tool, arguments)
+                    try:
+                        state = await self.refresh_session(state)
+                        return await self._call_with_state(state, tool, arguments)
+                    except (MCPConnectionError, MCPCallError):
+                        pass
                 except (MCPConnectionError, MCPCallError):
                     pass
-            await self._invalidate_matching_state(state)
-            state = await self.ensure_server(probe_existing=True)
-            state = await self.ensure_session(state)
+            state = await self._recover_server(state)
             return await self._call_with_state(state, tool, arguments)
 
     async def _list_tools_with_state(self, state: ServerState) -> list[str]:
@@ -223,12 +231,14 @@ class SerenaService:
         try:
             return await self._list_tools_with_state(state)
         except MCPSessionExpiredError:
-            state = await self.refresh_session(state)
-            return await self._list_tools_with_state(state)
+            try:
+                state = await self.refresh_session(state)
+                return await self._list_tools_with_state(state)
+            except (MCPConnectionError, MCPCallError):
+                state = await self._recover_server(state)
+                return await self._list_tools_with_state(state)
         except MCPConnectionError:
-            await self._invalidate_matching_state(state)
-            state = await self.ensure_server(probe_existing=True)
-            state = await self.ensure_session(state)
+            state = await self._recover_server(state)
             return await self._list_tools_with_state(state)
         except MCPCallError:
             # tools/list is read-only, so an ambiguous response can be retried.
@@ -236,13 +246,14 @@ class SerenaService:
                 try:
                     return await self._list_tools_with_state(state)
                 except MCPSessionExpiredError:
-                    state = await self.refresh_session(state)
-                    return await self._list_tools_with_state(state)
+                    try:
+                        state = await self.refresh_session(state)
+                        return await self._list_tools_with_state(state)
+                    except (MCPConnectionError, MCPCallError):
+                        pass
                 except (MCPConnectionError, MCPCallError):
                     pass
-            await self._invalidate_matching_state(state)
-            state = await self.ensure_server(probe_existing=True)
-            state = await self.ensure_session(state)
+            state = await self._recover_server(state)
             return await self._list_tools_with_state(state)
 
     def _same_project(self, state: ServerState) -> bool:

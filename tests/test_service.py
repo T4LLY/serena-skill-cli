@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 import serena_skill_cli.service as service_module
-from serena_skill_cli.errors import MCPCallError, MCPSessionExpiredError
+from serena_skill_cli.errors import MCPCallError, MCPConnectionError, MCPSessionExpiredError
 from serena_skill_cli.mcp_client import MCPSessionInfo
 from serena_skill_cli.service import SerenaService
 from serena_skill_cli.state import ServerState
@@ -458,3 +458,115 @@ async def test_status_probe_refreshes_expired_cached_session(tmp_path: Path, mon
     refreshed = ServerState.load(service.paths.state_file)
     assert refreshed is not None
     assert refreshed.mcp_session_id == "session-new"
+
+
+@pytest.mark.asyncio
+async def test_expired_session_disconnect_recovers_server_for_mutation(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SERENA_SKILL_STATE_DIR", str(tmp_path / "state"))
+    project = tmp_path / "repo-expired-disconnect"
+    project.mkdir()
+    service = SerenaService(project)
+    state = cached_state(project)
+    state.save(service.paths.state_file)
+    monkeypatch.setattr(service_module, "process_alive", lambda pid: pid == 123)
+
+    class ExpireThenDisconnectClient(FakeClient):
+        async def call_tool(self, _url, tool, arguments, **_kwargs):
+            self.tool_calls += 1
+            if self.tool_calls == 1:
+                raise MCPSessionExpiredError("expired")
+            if self.tool_calls == 2:
+                raise MCPConnectionError("disconnected after refresh")
+            return {"tool": tool, "arguments": arguments}
+
+    client = ExpireThenDisconnectClient()
+    service.client = client
+    recovered = ServerState(**{**state.__dict__, "mcp_session_id": "session-recovered"})
+    recovery_inputs = []
+
+    async def recover(current):
+        recovery_inputs.append(current)
+        return recovered
+
+    monkeypatch.setattr(service, "_recover_server", recover)
+
+    result = await service.call_tool("rename_symbol", {"name_path": "Foo", "new_name": "Bar"})
+
+    assert result["tool"] == "rename_symbol"
+    assert client.tool_calls == 3
+    assert recovery_inputs[0].mcp_session_id == "session-new"
+
+
+@pytest.mark.asyncio
+async def test_retry_safe_refresh_disconnect_recovers_server(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SERENA_SKILL_STATE_DIR", str(tmp_path / "state"))
+    project = tmp_path / "repo-retry-refresh-disconnect"
+    project.mkdir()
+    service = SerenaService(project)
+    state = cached_state(project)
+    state.save(service.paths.state_file)
+    monkeypatch.setattr(service_module, "process_alive", lambda pid: pid == 123)
+    monkeypatch.setattr(service_module, "is_listening", lambda port: port == 19400)
+
+    class RetryRefreshDisconnectClient(FakeClient):
+        async def call_tool(self, _url, tool, arguments, **_kwargs):
+            self.tool_calls += 1
+            if self.tool_calls == 1:
+                raise MCPCallError("response lost")
+            if self.tool_calls == 2:
+                raise MCPSessionExpiredError("expired")
+            if self.tool_calls == 3:
+                raise MCPConnectionError("disconnected after refresh")
+            return {"tool": tool, "arguments": arguments}
+
+    client = RetryRefreshDisconnectClient()
+    service.client = client
+    recovered = ServerState(**{**state.__dict__, "mcp_session_id": "session-recovered"})
+    recovery_inputs = []
+
+    async def recover(current):
+        recovery_inputs.append(current)
+        return recovered
+
+    monkeypatch.setattr(service, "_recover_server", recover)
+
+    result = await service.call_tool("find_symbol", {"name_path_pattern": "Foo"}, retry_safe=True)
+
+    assert result["tool"] == "find_symbol"
+    assert client.tool_calls == 4
+    assert recovery_inputs[0].mcp_session_id == "session-new"
+
+
+@pytest.mark.asyncio
+async def test_list_tools_refresh_disconnect_recovers_server(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SERENA_SKILL_STATE_DIR", str(tmp_path / "state"))
+    project = tmp_path / "repo-list-refresh-disconnect"
+    project.mkdir()
+    service = SerenaService(project)
+    state = cached_state(project)
+    state.save(service.paths.state_file)
+    monkeypatch.setattr(service_module, "process_alive", lambda pid: pid == 123)
+
+    class ExpireThenDisconnectListClient(FakeClient):
+        async def list_tools(self, _url, **_kwargs):
+            self.list_calls += 1
+            if self.list_calls == 1:
+                raise MCPSessionExpiredError("expired")
+            if self.list_calls == 2:
+                raise MCPConnectionError("disconnected after refresh")
+            return ["find_symbol"]
+
+    client = ExpireThenDisconnectListClient()
+    service.client = client
+    recovered = ServerState(**{**state.__dict__, "mcp_session_id": "session-recovered"})
+    recovery_inputs = []
+
+    async def recover(current):
+        recovery_inputs.append(current)
+        return recovered
+
+    monkeypatch.setattr(service, "_recover_server", recover)
+
+    assert await service.list_tools() == ["find_symbol"]
+    assert client.list_calls == 3
+    assert recovery_inputs[0].mcp_session_id == "session-new"

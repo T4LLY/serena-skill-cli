@@ -161,19 +161,28 @@ class MCPClient:
         from mcp import ClientSession
         from mcp.client.streamable_http import streamable_http_client
 
+        acquired_session_id: str | None = None
+
         async def run() -> MCPSessionInfo:
+            nonlocal acquired_session_id
             try:
                 async with streamable_http_client(url, terminate_on_close=False) as (
                     read_stream,
                     write_stream,
                     get_session_id,
                 ):
-                    async with ClientSession(read_stream, write_stream) as session:
-                        result = await session.initialize()
-                        return MCPSessionInfo(
-                            session_id=get_session_id(),
-                            protocol_version=str(result.protocolVersion),
-                        )
+                    try:
+                        async with ClientSession(read_stream, write_stream) as session:
+                            result = await session.initialize()
+                            acquired_session_id = get_session_id()
+                            return MCPSessionInfo(
+                                session_id=acquired_session_id,
+                                protocol_version=str(result.protocolVersion),
+                            )
+                    finally:
+                        # The SDK may have received a session ID before initialize()
+                        # completes. Preserve it so a timeout can terminate the orphan.
+                        acquired_session_id = acquired_session_id or get_session_id()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -183,7 +192,33 @@ class MCPClient:
         try:
             return await asyncio.wait_for(run(), timeout=limit)
         except asyncio.TimeoutError as exc:
+            if acquired_session_id:
+                await asyncio.to_thread(
+                    self._terminate_session_sync,
+                    url,
+                    acquired_session_id,
+                    timeout=min(1.0, self.health_timeout),
+                )
             raise MCPConnectionError(f"MCP initialization timed out after {limit:g}s for {url}") from exc
+
+    def _terminate_session_sync(self, url: str, session_id: str, *, timeout: float) -> None:
+        """Best-effort termination for a session created by a timed-out initialize."""
+        parts = urlsplit(url)
+        if parts.scheme != "http" or parts.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            return
+        port = parts.port or 80
+        target = parts.path or "/"
+        if parts.query:
+            target += f"?{parts.query}"
+        connection = HTTPConnection(parts.hostname, port, timeout=timeout)
+        try:
+            connection.request("DELETE", target, headers={"Mcp-Session-Id": session_id})
+            response = connection.getresponse()
+            response.read()
+        except (ConnectionError, OSError, socket.timeout):
+            pass
+        finally:
+            connection.close()
 
     def _direct_request_sync(
         self,
@@ -274,10 +309,8 @@ class MCPClient:
         *,
         timeout: float | None = None,
     ) -> Any:
-        # The CLI performs one local request at a time. Keeping this synchronous
-        # avoids a second resident process and avoids importing a large async HTTP
-        # client on every warm invocation.
-        return self._direct_request_sync(
+        return await asyncio.to_thread(
+            self._direct_request_sync,
             url,
             session_id,
             protocol_version,
