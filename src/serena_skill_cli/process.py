@@ -137,6 +137,18 @@ def process_alive(pid: int) -> bool:
         return False
     if os.name == "nt":
         return _windows_process_alive(pid)
+
+    # Reap a direct child that has already exited. kill(pid, 0) still succeeds
+    # for a zombie, which otherwise makes shutdown wait for the full timeout.
+    try:
+        waited, _status = os.waitpid(pid, os.WNOHANG)
+        if waited == pid:
+            return False
+    except ChildProcessError:
+        pass
+    except OSError:
+        pass
+
     try:
         os.kill(pid, 0)
     except OSError:
@@ -243,6 +255,25 @@ def _run_taskkill(pid: int, *, force: bool) -> None:
     )
 
 
+def _posix_process_group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _signal_posix_process_group(pgid: int, sig: int) -> None:
+    try:
+        os.killpg(pgid, sig)
+    except ProcessLookupError:
+        return
+    except OSError:
+        # start_new_session=True makes Serena the group leader, but fall back to
+        # the leader PID if a platform does not expose the expected group.
+        os.kill(pgid, sig)
+
+
 def stop_process(pid: int, timeout: float = 5.0, *, expected_identity: str | None = None) -> None:
     def still_owned() -> bool:
         return expected_identity is None or process_identity(pid) == expected_identity
@@ -258,14 +289,16 @@ def stop_process(pid: int, timeout: float = 5.0, *, expected_identity: str | Non
             _run_taskkill(pid, force=True)
         return
     try:
-        os.kill(pid, signal.SIGTERM)
+        _signal_posix_process_group(pid, signal.SIGTERM)
     except OSError:
         return
     deadline = time.monotonic() + timeout
-    while process_alive(pid) and time.monotonic() < deadline:
+    while _posix_process_group_alive(pid) and time.monotonic() < deadline:
+        # Reap the direct Serena child when this CLI instance spawned it.
+        process_alive(pid)
         time.sleep(0.05)
-    if process_alive(pid) and still_owned():
+    if _posix_process_group_alive(pid):
         try:
-            os.kill(pid, signal.SIGKILL)
+            _signal_posix_process_group(pid, signal.SIGKILL)
         except OSError:
             pass

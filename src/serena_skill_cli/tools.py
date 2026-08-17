@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -44,6 +45,12 @@ def implementations_args(ns) -> tuple[str, dict[str, Any]]:
 
 
 def declaration_args(ns) -> tuple[str, dict[str, Any]]:
+    try:
+        groups = re.compile(ns.regex).groups
+    except re.error as exc:
+        raise ValueError(f"--regex is not a valid regular expression: {exc}") from exc
+    if groups != 1:
+        raise ValueError(f"--regex must contain exactly one capture group; found {groups}")
     return "find_declaration", {
         "relative_path": ns.path,
         "regex": ns.regex,

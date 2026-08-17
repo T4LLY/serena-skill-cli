@@ -1,7 +1,9 @@
 import argparse
 from pathlib import Path
 
-from serena_skill_cli.tools import edit_args, find_args, refs_args
+import pytest
+
+from serena_skill_cli.tools import declaration_args, edit_args, find_args, refs_args
 
 
 def ns(**kwargs):
@@ -29,3 +31,16 @@ def test_multiline_edit_reads_content_file(tmp_path: Path):
     tool, args = edit_args(ns(edit_command="replace-body", name="x", path="a.py", content=None, content_file=content))
     assert tool == "replace_symbol_body"
     assert args["body"].startswith("def x")
+
+
+def test_declaration_regex_requires_exactly_one_capture_group():
+    with pytest.raises(ValueError, match="exactly one capture group"):
+        declaration_args(ns(path="a.py", regex="Foo", within=None, body=False, info=False))
+    with pytest.raises(ValueError, match="exactly one capture group"):
+        declaration_args(ns(path="a.py", regex="(Foo)(Bar)", within=None, body=False, info=False))
+
+
+def test_declaration_regex_accepts_one_capture_group():
+    tool, args = declaration_args(ns(path="a.py", regex=r"def (foo)\(", within=None, body=False, info=False))
+    assert tool == "find_declaration"
+    assert args["regex"] == r"def (foo)\("

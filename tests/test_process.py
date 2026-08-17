@@ -7,7 +7,7 @@ from serena_skill_cli.process import _windows_creationflags, build_server_comman
 
 
 def test_server_command_uses_streamable_http(tmp_path: Path):
-    cmd = build_server_command(tmp_path, 19401, "ide-assistant", "serena")
+    cmd = build_server_command(tmp_path, 19401, "ide", "serena")
     assert cmd[:2] == ["serena", "start-mcp-server"]
     assert cmd[cmd.index("--transport") + 1] == "streamable-http"
     assert cmd[cmd.index("--project") + 1] == str(tmp_path)
@@ -47,3 +47,28 @@ def test_windows_serena_command_handles_quoted_executable_path():
         "run",
         "serena",
     ]
+
+
+@pytest.mark.skipif(process_module.os.name == "nt", reason="POSIX-only process semantics")
+def test_process_alive_reaps_exited_direct_child(monkeypatch):
+    signals = []
+    monkeypatch.setattr(process_module.os, "waitpid", lambda _pid, _flags: (123, 0))
+    monkeypatch.setattr(process_module.os, "kill", lambda *args: signals.append(args))
+
+    assert process_module.process_alive(123) is False
+    assert signals == []
+
+
+@pytest.mark.skipif(process_module.os.name == "nt", reason="POSIX-only process groups")
+def test_stop_process_signals_serena_process_group(monkeypatch):
+    signals = []
+    group_checks = iter([True, False, False])
+    monkeypatch.setattr(process_module, "process_alive", lambda _pid: True)
+    monkeypatch.setattr(process_module, "process_identity", lambda _pid: "owned")
+    monkeypatch.setattr(process_module, "_posix_process_group_alive", lambda _pid: next(group_checks))
+    monkeypatch.setattr(process_module.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(process_module.time, "sleep", lambda _seconds: None)
+
+    process_module.stop_process(123, timeout=0.1, expected_identity="owned")
+
+    assert signals == [(123, process_module.signal.SIGTERM)]

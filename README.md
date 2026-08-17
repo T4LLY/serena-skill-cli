@@ -107,7 +107,7 @@ serena-cli --serena-command 'uv run serena' server start
 The wrapper starts Serena as:
 
 ```text
-serena start-mcp-server --transport streamable-http --host 127.0.0.1 --port <port> --project <root> --context ide-assistant
+serena start-mcp-server --transport streamable-http --host 127.0.0.1 --port <port> --project <root> --context ide
 ```
 
 and explicitly disables dashboard/browser/gui-log startup for the background instance.
@@ -179,8 +179,8 @@ After upgrading from 0.1.2, an existing live Serena process is reused. The first
 
 - Windows: `%LOCALAPPDATA%\serena-skill-cli\projects\<project-id>`
 - POSIX: `$XDG_STATE_HOME/serena-skill-cli/projects/<project-id>` or `~/.local/state/...`
-- per-project file lock prevents duplicate Serena processes and serializes MCP-session creation/refresh for the same repository
-- a global port-allocation lock prevents simultaneous projects from choosing the same local port during startup
+- per-project file lock prevents duplicate Serena processes and serializes MCP-session creation/refresh for the same repository; async callers wait without blocking the event loop
+- a global port-allocation lock prevents simultaneous projects from choosing the same local port until Serena owns its listening socket; MCP/LSP initialization then continues without blocking other projects
 - stale PID/state is replaced automatically
 - Windows PID liveness uses Win32 process handles; it does not use `os.kill(pid, 0)`
 - mismatched/corrupt state is removed without killing an unrelated PID

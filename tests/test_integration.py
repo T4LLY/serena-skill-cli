@@ -33,6 +33,7 @@ async def test_real_serena_cached_session_survives_across_cli_style_calls(tmp_pa
         overview = await service.call_tool(
             "get_symbols_overview",
             {"relative_path": "sample.py", "depth": -1, "max_answer_chars": -1},
+            retry_safe=True,
         )
         assert "Foo" in str(overview)
 
@@ -52,8 +53,9 @@ async def test_real_serena_cached_session_survives_across_cli_style_calls(tmp_pa
                 "include_info": False,
                 "substring_matching": False,
                 "max_answer_chars": -1,
-                "max_results": -1,
+                "max_matches": -1,
             },
+            retry_safe=True,
         )
         assert "Foo" in str(result)
         persisted_after = ServerState.load(service.paths.state_file)

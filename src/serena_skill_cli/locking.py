@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from pathlib import Path
@@ -14,13 +15,21 @@ class FileLock:
         self.poll_interval = poll_interval
         self._file = None
 
-    def __enter__(self) -> "FileLock":
+    def _open(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._file = self.path.open("a+b")
         self._file.seek(0, os.SEEK_END)
         if self._file.tell() == 0:
             self._file.write(b"0")
             self._file.flush()
+
+    def _close(self) -> None:
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+
+    def __enter__(self) -> "FileLock":
+        self._open()
         deadline = time.monotonic() + self.timeout
         while True:
             try:
@@ -28,10 +37,22 @@ class FileLock:
                 return self
             except OSError:
                 if time.monotonic() >= deadline:
-                    self._file.close()
-                    self._file = None
+                    self._close()
                     raise TimeoutError(f"Timed out acquiring lock: {self.path}")
                 time.sleep(self.poll_interval)
+
+    async def __aenter__(self) -> "FileLock":
+        self._open()
+        deadline = time.monotonic() + self.timeout
+        while True:
+            try:
+                self._acquire()
+                return self
+            except OSError:
+                if time.monotonic() >= deadline:
+                    self._close()
+                    raise TimeoutError(f"Timed out acquiring lock: {self.path}")
+                await asyncio.sleep(self.poll_interval)
 
     def _acquire(self) -> None:
         assert self._file is not None
@@ -62,5 +83,7 @@ class FileLock:
             try:
                 self._release()
             finally:
-                self._file.close()
-                self._file = None
+                self._close()
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        self.__exit__(exc_type, exc, tb)

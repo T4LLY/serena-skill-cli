@@ -26,3 +26,8 @@ def test_server_status_probe_is_opt_in():
     assert ns.probe is False
     ns = build_parser().parse_args(["server", "status", "--probe"])
     assert ns.probe is True
+
+
+def test_default_context_uses_current_generic_ide_context():
+    ns = build_parser().parse_args(["server", "status"])
+    assert ns.context == "ide"

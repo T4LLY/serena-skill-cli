@@ -24,7 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="serena-cli", description="Token-light CLI facade over a project-local Serena MCP server.")
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--project", help="Project root. Defaults to nearest .serena/project.yml or .git ancestor.")
-    parser.add_argument("--context", default="ide-assistant", help="Serena context passed to start-mcp-server.")
+    parser.add_argument("--context", default="ide", help="Serena context passed to start-mcp-server.")
     parser.add_argument("--timeout", type=float, default=30.0, help="Timeout for one MCP operation.")
     parser.add_argument("--startup-timeout", type=float, default=120.0, help="Timeout for initial Serena/LSP startup.")
     parser.add_argument("--serena-command", help="Command used to launch Serena; env: SERENA_SKILL_SERENA_COMMAND.")
@@ -144,7 +144,7 @@ async def _run_async(ns) -> dict:
         if ns.server_command == "status":
             return envelope(ok=True, result=await service.status(probe=ns.probe), project=str(project))
         if ns.server_command == "stop":
-            service.stop()
+            await asyncio.to_thread(service.stop)
             return envelope(ok=True, result={"stopped": True}, project=str(project))
         if ns.server_command == "restart":
             state = await service.restart()

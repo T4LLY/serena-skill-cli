@@ -7,14 +7,19 @@ from pathlib import Path
 from .project import project_id
 
 
+def _env_path(name: str, fallback: Path) -> Path:
+    value = os.environ.get(name)
+    return Path(value).expanduser() if value else fallback
+
+
 def state_root() -> Path:
     override = os.environ.get("SERENA_SKILL_STATE_DIR")
     if override:
         return Path(override).expanduser().resolve()
     if os.name == "nt":
-        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+        base = _env_path("LOCALAPPDATA", Path.home() / "AppData" / "Local")
         return base / "serena-skill-cli"
-    base = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+    base = _env_path("XDG_STATE_HOME", Path.home() / ".local" / "state")
     return base / "serena-skill-cli"
 
 
