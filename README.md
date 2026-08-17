@@ -92,6 +92,12 @@ Default launch command is `serena`. To use another installation form:
 $env:SERENA_SKILL_SERENA_COMMAND = 'C:\path\to\serena.exe'
 ```
 
+Windows paths containing spaces are also supported when the executable is quoted inside the command value:
+
+```powershell
+$env:SERENA_SKILL_SERENA_COMMAND = '"C:\Program Files\Serena\serena.exe"'
+```
+
 or:
 
 ```powershell
@@ -157,7 +163,9 @@ If Serena returns HTTP 404 for an expired/unknown MCP session, the CLI re-initia
 
 `server status` is intentionally local and fast: it checks state, PID, and listening port only. Use `server status --probe` when you explicitly want a real MCP request.
 
-Initial Serena/LSP startup has its own timeout (`--startup-timeout`, default 120 seconds), separate from normal MCP operation timeout (`--timeout`, default 30 seconds). This matters for large Unity/C#/Java repositories where language-server initialization can legitimately exceed 30 seconds.
+Initial Serena/LSP startup has its own timeout (`--startup-timeout`, default 120 seconds), separate from normal MCP operation timeout (`--timeout`, default 30 seconds). Tool calls made while a newly started server is still inside that startup window inherit the remaining startup-timeout budget, so background language-server initialization remains covered even after MCP `initialize` has completed. This matters for large Unity/C#/Java repositories where language-server initialization can legitimately exceed 30 seconds.
+
+Persisted server state records an OS-derived process identity for newly started Serena processes. Stop/restart only terminates a persisted PID when that identity still matches; legacy state without an identity token is removed without killing a process based on PID alone.
 
 To measure warm-call latency on PowerShell:
 

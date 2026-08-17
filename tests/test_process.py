@@ -1,7 +1,9 @@
 from pathlib import Path
 
+import pytest
+
 import serena_skill_cli.process as process_module
-from serena_skill_cli.process import _windows_creationflags, build_server_command
+from serena_skill_cli.process import _windows_creationflags, build_server_command, parse_serena_command
 
 
 def test_server_command_uses_streamable_http(tmp_path: Path):
@@ -22,3 +24,26 @@ def test_windows_flags_use_no_window_not_detached(monkeypatch):
     assert flags & 0x200
     assert flags & 0x8000000
     assert not flags & 0x8
+
+
+def test_stop_process_does_not_signal_reused_pid(monkeypatch):
+    taskkills = []
+    signals = []
+    monkeypatch.setattr(process_module, "process_alive", lambda _pid: True)
+    monkeypatch.setattr(process_module, "process_identity", lambda _pid: "different-process")
+    monkeypatch.setattr(process_module, "_run_taskkill", lambda *args, **kwargs: taskkills.append((args, kwargs)))
+    monkeypatch.setattr(process_module.os, "kill", lambda *args: signals.append(args))
+
+    process_module.stop_process(123, expected_identity="original-process")
+
+    assert taskkills == []
+    assert signals == []
+
+
+@pytest.mark.skipif(process_module.os.name != "nt", reason="requires Windows CommandLineToArgvW")
+def test_windows_serena_command_handles_quoted_executable_path():
+    assert parse_serena_command(r'"C:\Program Files\uv\uv.exe" run serena') == [
+        r"C:\Program Files\uv\uv.exe",
+        "run",
+        "serena",
+    ]

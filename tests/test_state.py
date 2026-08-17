@@ -31,6 +31,16 @@ def test_v1_state_loads_without_cached_session(tmp_path: Path):
     assert state.has_cached_session is False
 
 
+def test_process_identity_round_trip(tmp_path: Path):
+    path = tmp_path / "state.json"
+    state = ServerState(
+        project="/repo", pid=12, port=19400, url="http://127.0.0.1:19400/mcp",
+        context="ide-assistant", started_at=1.0, process_identity="windows:12345"
+    )
+    state.save(path)
+    assert ServerState.load(path) == state
+
+
 def test_cached_session_round_trip(tmp_path: Path):
     path = tmp_path / "state.json"
     state = ServerState(

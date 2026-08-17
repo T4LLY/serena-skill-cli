@@ -233,6 +233,46 @@ async def test_cached_session_404_is_explicitly_recoverable(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_cached_call_forwards_explicit_timeout(monkeypatch):
+    client = MCPClient(timeout=2)
+    observed = {}
+
+    async def cached_request(_url, _session_id, _protocol_version, _method, _params, *, timeout=None):
+        observed["timeout"] = timeout
+        return {"content": [{"type": "text", "text": "[]"}], "isError": False}
+
+    monkeypatch.setattr(client, "_cached_request", cached_request)
+    result = await client.call_tool(
+        "http://127.0.0.1:19400/mcp",
+        "find_symbol",
+        {},
+        session_id="cached-session",
+        protocol_version="2025-06-18",
+        timeout=90.0,
+    )
+
+    assert result == []
+    assert observed["timeout"] == 90.0
+
+
+@pytest.mark.asyncio
+async def test_is_ready_propagates_expired_cached_session(monkeypatch):
+    RecordingConnection.response_factory = lambda _connection: FakeHTTPResponse(
+        404,
+        "application/json",
+        b'{"jsonrpc":"2.0","id":"server-error","error":{"code":-32600,"message":"Session not found"}}',
+    )
+    monkeypatch.setattr(mcp_client_module, "HTTPConnection", RecordingConnection)
+
+    with pytest.raises(MCPSessionExpiredError):
+        await MCPClient(timeout=2).is_ready(
+            "http://127.0.0.1:19400/mcp",
+            session_id="expired",
+            protocol_version="2025-06-18",
+        )
+
+
+@pytest.mark.asyncio
 async def test_cached_list_tools_uses_direct_request(monkeypatch):
     def response_factory(connection):
         request = json.loads(connection.body)

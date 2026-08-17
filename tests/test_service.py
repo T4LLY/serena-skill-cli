@@ -16,6 +16,7 @@ class FakeClient:
         self.initialize_calls = 0
         self.list_calls = 0
         self.last_session = None
+        self.last_timeout = None
 
     async def initialize_session(self, _url, **_kwargs):
         self.initialize_calls += 1
@@ -29,6 +30,7 @@ class FakeClient:
     async def call_tool(self, _url, tool, arguments, **kwargs):
         self.tool_calls += 1
         self.last_session = (kwargs.get("session_id"), kwargs.get("protocol_version"))
+        self.last_timeout = kwargs.get("timeout")
         return {"tool": tool, "arguments": arguments}
 
     async def list_tools(self, _url, **kwargs):
@@ -245,3 +247,116 @@ async def test_list_tools_uses_cached_session(tmp_path: Path, monkeypatch):
     assert client.list_calls == 1
     assert client.initialize_calls == 0
     assert client.last_session == ("session-old", "2025-06-18")
+
+
+def test_reused_pid_is_not_terminated_when_process_identity_changed(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SERENA_SKILL_STATE_DIR", str(tmp_path / "state"))
+    project = tmp_path / "repo-pid"
+    project.mkdir()
+    service = SerenaService(project)
+    state = ServerState(
+        project=str(project.resolve()),
+        pid=123,
+        port=19400,
+        url="http://127.0.0.1:19400/mcp",
+        context="ide-assistant",
+        started_at=1.0,
+        process_identity="original-process",
+    )
+    state.save(service.paths.state_file)
+    stopped = []
+    monkeypatch.setattr(service_module, "process_identity", lambda _pid: "reused-process")
+    monkeypatch.setattr(service_module, "stop_process", lambda *args, **kwargs: stopped.append((args, kwargs)))
+
+    service.stop()
+
+    assert stopped == []
+    assert not service.paths.state_file.exists()
+
+
+def test_legacy_state_is_removed_without_terminating_pid(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SERENA_SKILL_STATE_DIR", str(tmp_path / "state"))
+    project = tmp_path / "repo-legacy-pid"
+    project.mkdir()
+    service = SerenaService(project)
+    state = cached_state(project)
+    state.save(service.paths.state_file)
+    stopped = []
+    monkeypatch.setattr(service_module, "stop_process", lambda *args, **kwargs: stopped.append((args, kwargs)))
+
+    service.stop()
+
+    assert stopped == []
+    assert not service.paths.state_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_recent_server_tool_call_uses_remaining_startup_timeout(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SERENA_SKILL_STATE_DIR", str(tmp_path / "state"))
+    project = tmp_path / "repo-startup-timeout"
+    project.mkdir()
+    service = SerenaService(project, timeout=30.0, startup_timeout=120.0)
+    client = FakeClient()
+    service.client = client
+    state = cached_state(project)
+    state = ServerState(**{**state.__dict__, "started_at": 990.0})
+    state.save(service.paths.state_file)
+    monkeypatch.setattr(service_module.time, "time", lambda: 1000.0)
+    monkeypatch.setattr(service_module, "process_alive", lambda pid: pid == 123)
+
+    await service.call_tool("find_symbol", {"name_path_pattern": "Foo"})
+
+    assert client.last_timeout == pytest.approx(110.0)
+
+
+@pytest.mark.asyncio
+async def test_warm_server_tool_call_uses_normal_operation_timeout(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SERENA_SKILL_STATE_DIR", str(tmp_path / "state"))
+    project = tmp_path / "repo-warm-timeout"
+    project.mkdir()
+    service = SerenaService(project, timeout=30.0, startup_timeout=120.0)
+    client = FakeClient()
+    service.client = client
+    state = cached_state(project)
+    state = ServerState(**{**state.__dict__, "started_at": 800.0})
+    state.save(service.paths.state_file)
+    monkeypatch.setattr(service_module.time, "time", lambda: 1000.0)
+    monkeypatch.setattr(service_module, "process_alive", lambda pid: pid == 123)
+
+    await service.call_tool("find_symbol", {"name_path_pattern": "Foo"})
+
+    assert client.last_timeout == pytest.approx(30.0)
+
+
+@pytest.mark.asyncio
+async def test_status_probe_refreshes_expired_cached_session(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SERENA_SKILL_STATE_DIR", str(tmp_path / "state"))
+    project = tmp_path / "repo-expired-probe"
+    project.mkdir()
+    service = SerenaService(project)
+    state = cached_state(project)
+    state.save(service.paths.state_file)
+    monkeypatch.setattr(service_module, "process_alive", lambda pid: pid == 123)
+    monkeypatch.setattr(service_module, "is_listening", lambda port: port == 19400)
+
+    class ExpiredProbeClient(FakeClient):
+        async def is_ready(self, _url, **kwargs):
+            self.ready_calls += 1
+            self.last_session = (kwargs.get("session_id"), kwargs.get("protocol_version"))
+            if self.ready_calls == 1:
+                raise MCPSessionExpiredError("expired")
+            return True
+
+    client = ExpiredProbeClient()
+    service.client = client
+
+    status = await service.status(probe=True)
+
+    assert status["running"] is True
+    assert status["mcp_ready"] is True
+    assert status["mcp_session_cached"] is True
+    assert client.ready_calls == 2
+    assert client.initialize_calls == 1
+    refreshed = ServerState.load(service.paths.state_file)
+    assert refreshed is not None
+    assert refreshed.mcp_session_id == "session-new"

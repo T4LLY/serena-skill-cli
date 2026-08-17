@@ -14,6 +14,7 @@ class ServerState:
     url: str
     context: str
     started_at: float
+    process_identity: str | None = None
     mcp_session_id: str | None = None
     mcp_protocol_version: str | None = None
     version: int = 2

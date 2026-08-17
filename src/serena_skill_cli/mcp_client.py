@@ -329,6 +329,8 @@ class MCPClient:
                     timeout=timeout or self.health_timeout,
                 )
             return True
+        except MCPSessionExpiredError:
+            raise
         except Exception:
             return False
 
@@ -340,6 +342,7 @@ class MCPClient:
         *,
         session_id: str | None = None,
         protocol_version: str | None = None,
+        timeout: float | None = None,
     ) -> Any:
         if session_id and protocol_version:
             result = await self._cached_request(
@@ -348,6 +351,7 @@ class MCPClient:
                 protocol_version,
                 "tools/call",
                 {"name": tool, "arguments": arguments},
+                timeout=timeout,
             )
             return _normalize_result(result)
 
@@ -355,4 +359,4 @@ class MCPClient:
             result = await session.call_tool(tool, arguments=arguments)
             return _normalize_result(result)
 
-        return await self._legacy_session(url, op)
+        return await self._legacy_session(url, op, timeout=timeout)
